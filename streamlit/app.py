@@ -1,12 +1,10 @@
-import sys
+import os
 from pathlib import Path
 
+import requests
 import streamlit as st
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
-sys.path.insert(0, str(BACKEND_DIR))
-
-import rag_service
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 st.set_page_config(
     page_title="Research IQ",
@@ -48,20 +46,18 @@ st.markdown(
         margin-top: 0.5rem;
     }
 
-    div[data-baseweb="textarea"] {
+    div[data-baseweb="textarea"], div[data-baseweb="input"] {
         border: 2px solid #374151 !important;
         border-radius: 12px !important;
         background: #1F2937 !important;
     }
 
-    /* Focus state */
-    div[data-baseweb="textarea"]:focus-within {
+    div[data-baseweb="textarea"]:focus-within, div[data-baseweb="input"]:focus-within {
         border: 2px solid #6366F1 !important;
         box-shadow: 0 0 0 2px rgba(99,102,241,0.25) !important;
     }
 
-    /* Actual textarea */
-    div[data-baseweb="textarea"] textarea {
+    div[data-baseweb="textarea"] textarea, div[data-baseweb="input"] input {
         background: transparent !important;
         color: white !important;
     }
@@ -91,6 +87,23 @@ st.markdown(
         color: #818CF8;
         margin-top: 0;
     }
+
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+
+    .stTabs [data-baseweb="tab"] {
+        background-color: #1F2937;
+        border-radius: 10px 10px 0 0;
+        padding: 0.5rem 1.25rem;
+        color: #9CA3AF;
+    }
+
+    .stTabs [aria-selected="true"] {
+        background-color: #111827;
+        color: #818CF8 !important;
+        border-bottom: 2px solid #6366F1;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -102,9 +115,114 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-papers = rag_service.list_papers()
+if "token" not in st.session_state:
+    st.session_state.token = None
+    st.session_state.user_name = None
+
+
+def _error_detail(response: requests.Response, fallback: str) -> str:
+    try:
+        return response.json().get("detail", fallback)
+    except ValueError:
+        return fallback
+
+
+def auth_headers() -> dict:
+    return {"Authorization": f"Bearer {st.session_state.token}"}
+
+
+# --------------------------------------------------------------------------
+# Logged-out view: Log In / Sign Up
+# --------------------------------------------------------------------------
+if not st.session_state.token:
+    login_tab, signup_tab = st.tabs(["Log In", "Sign Up"])
+
+    with login_tab:
+        login_email = st.text_input("Email", key="login_email")
+        login_password = st.text_input("Password", type="password", key="login_password")
+
+        if st.button("Log In", use_container_width=True):
+            if not login_email or not login_password:
+                st.warning("Enter your email and password.")
+            else:
+                try:
+                    response = requests.post(
+                        f"{API_BASE_URL}/auth/login",
+                        data={"username": login_email, "password": login_password},
+                        timeout=30,
+                    )
+                except requests.RequestException:
+                    st.error("Could not reach the backend. Is it running?")
+                else:
+                    if response.status_code == 200:
+                        st.session_state.token = response.json()["access_token"]
+                        st.session_state.user_name = login_email
+                        st.rerun()
+                    else:
+                        st.error(_error_detail(response, "Login failed."))
+
+    with signup_tab:
+        signup_name = st.text_input("Name", key="signup_name")
+        signup_email = st.text_input("Email", key="signup_email")
+        signup_password = st.text_input("Password", type="password", key="signup_password")
+
+        if st.button("Create Account", use_container_width=True):
+            if not (signup_name and signup_email and signup_password):
+                st.warning("Fill in all fields.")
+            elif len(signup_password) < 8:
+                st.warning("Password must be at least 8 characters.")
+            else:
+                try:
+                    response = requests.post(
+                        f"{API_BASE_URL}/auth/signup",
+                        json={
+                            "name": signup_name,
+                            "email": signup_email,
+                            "password": signup_password,
+                        },
+                        timeout=30,
+                    )
+                except requests.RequestException:
+                    st.error("Could not reach the backend. Is it running?")
+                else:
+                    if response.status_code == 201:
+                        st.success("Account created — you can log in now.")
+                    else:
+                        st.error(_error_detail(response, "Sign up failed."))
+
+    st.stop()
+
+# --------------------------------------------------------------------------
+# Logged-in view
+# --------------------------------------------------------------------------
+
+
+def fetch_papers() -> list[dict]:
+    try:
+        response = requests.get(f"{API_BASE_URL}/papers", headers=auth_headers(), timeout=30)
+    except requests.RequestException:
+        st.error("Could not reach the backend.")
+        return []
+
+    if response.status_code == 200:
+        return response.json()
+    if response.status_code == 401:
+        st.session_state.token = None
+        st.rerun()
+    st.error(_error_detail(response, "Failed to load papers."))
+    return []
+
+
+papers = fetch_papers()
 
 with st.sidebar:
+    st.write(f"Logged in as **{st.session_state.user_name}**")
+    if st.button("Log Out", use_container_width=True):
+        st.session_state.token = None
+        st.session_state.user_name = None
+        st.rerun()
+
+    st.markdown("---")
     st.header("Upload")
     uploaded_files = st.file_uploader(
         "Upload Research Paper",
@@ -119,10 +237,26 @@ with st.sidebar:
         else:
             saved = 0
             for uploaded in uploaded_files:
-                rag_service.save_paper(uploaded.name, uploaded.getbuffer())
-                saved += 1
-            st.success(f"Saved {saved} paper(s).")
-            st.rerun()
+                files = {"file": (uploaded.name, uploaded.getvalue(), "application/pdf")}
+                try:
+                    response = requests.post(
+                        f"{API_BASE_URL}/papers",
+                        headers=auth_headers(),
+                        files=files,
+                        timeout=120,
+                    )
+                except requests.RequestException:
+                    st.error("Could not reach the backend.")
+                    break
+
+                if response.status_code == 201:
+                    saved += 1
+                else:
+                    st.error(f"{uploaded.name}: {_error_detail(response, 'Upload failed.')}")
+
+            if saved:
+                st.success(f"Saved {saved} paper(s).")
+                st.rerun()
 
     st.markdown("---")
     st.subheader("Your Papers")
@@ -133,54 +267,110 @@ with st.sidebar:
             col1, col2 = st.columns([3, 1])
             with col1:
                 st.write(paper["filename"])
-                st.caption(f"{paper['size_kb']} KB")
             with col2:
                 if st.button("Remove", key=f"remove_{paper['filename']}"):
-                    rag_service.delete_paper(paper["filename"])
-                    st.rerun()
+                    try:
+                        response = requests.delete(
+                            f"{API_BASE_URL}/papers/{paper['filename']}",
+                            headers=auth_headers(),
+                            timeout=30,
+                        )
+                    except requests.RequestException:
+                        st.error("Could not reach the backend.")
+                    else:
+                        if response.status_code == 200:
+                            st.rerun()
+                        else:
+                            st.error(_error_detail(response, "Failed to remove paper."))
 
 
-question = st.text_area(
-    "Ask anything about your research papers",
-    height=140,
-    placeholder="Example: What methodology is proposed in the paper?",
-)
+ask_tab, summarize_tab = st.tabs(["Ask", "Summarize"])
 
-if st.button("Get Answer", use_container_width=True):
+with ask_tab:
+    question = st.text_area(
+        "Ask anything about your research papers",
+        height=140,
+        placeholder="Example: What methodology is proposed in the paper?",
+    )
+
+    if st.button("Get Answer", use_container_width=True):
+        if not papers:
+            st.warning("Upload at least one research paper first.")
+        elif not question.strip():
+            st.warning("Please enter a question.")
+        else:
+            with st.spinner("Analyzing research papers..."):
+                try:
+                    response = requests.post(
+                        f"{API_BASE_URL}/query",
+                        headers=auth_headers(),
+                        json={"question": question.strip()},
+                        timeout=120,
+                    )
+                except requests.RequestException:
+                    st.error("Could not reach the backend.")
+                    st.stop()
+
+            if response.status_code != 200:
+                st.error(_error_detail(response, "Failed to process your question."))
+                st.stop()
+
+            result = response.json()
+            st.markdown("### Answer")
+            st.markdown(result["answer"])
+            st.caption(f"Response time: {result['response_time_sec']:.2f} sec")
+
+            if result["sources"]:
+                with st.expander("Sources"):
+                    for i, source in enumerate(result["sources"], start=1):
+                        source_name = source.get("metadata", {}).get("source", "")
+                        if source_name:
+                            source_name = Path(source_name).name
+                        st.markdown(f"**Source {i}** {f'— {source_name}' if source_name else ''}")
+                        st.write(source["content"])
+                        st.markdown("---")
+
+with summarize_tab:
     if not papers:
         st.warning("Upload at least one research paper first.")
-    elif not question.strip():
-        st.warning("Please enter a question.")
     else:
-        with st.spinner("Analyzing research papers..."):
-            try:
-                result = rag_service.query_papers(question.strip())
-            except ValueError as exc:
-                st.error(str(exc))
-                st.stop()
-            except RuntimeError as exc:
-                st.error(str(exc))
-                st.stop()
-            except Exception:
-                st.error("Failed to process your question. Please try again.")
+        filenames = [paper["filename"] for paper in papers]
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            selected_paper = st.selectbox("Choose a paper to summarize", filenames)
+        with col2:
+            summary_length = st.selectbox("Length", ["brief", "detailed"])
+
+        if st.button("Generate Summary", use_container_width=True):
+            with st.spinner(f"Summarizing {selected_paper}..."):
+                try:
+                    response = requests.post(
+                        f"{API_BASE_URL}/summarize",
+                        headers=auth_headers(),
+                        json={"filename": selected_paper, "length": summary_length},
+                        timeout=180,
+                    )
+                except requests.RequestException:
+                    st.error("Could not reach the backend.")
+                    st.stop()
+
+            if response.status_code != 200:
+                st.error(_error_detail(response, "Failed to summarize this paper."))
                 st.stop()
 
-        st.markdown("### Answer")
-        st.markdown(result["answer"])
-        st.caption(f"Response time: {result['response_time_sec']:.2f} sec")
-
-        if result["sources"]:
-            with st.expander("Sources"):
-                for i, source in enumerate(result["sources"], start=1):
-                    source_name = source.get("metadata", {}).get("source", "")
-                    if source_name:
-                        source_name = Path(source_name).name
-                    st.markdown(f"**Source {i}** {f'— {source_name}' if source_name else ''}")
-                    st.write(source["content"])
-                    st.markdown("---")
+            result = response.json()
+            st.markdown('<div class="answer-box">', unsafe_allow_html=True)
+            st.markdown(f"### Summary — {selected_paper}")
+            st.markdown(result["summary"])
+            st.markdown("</div>", unsafe_allow_html=True)
+            st.caption(
+                f"Response time: {result['response_time_sec']:.2f} sec · "
+                f"{result['chunks_processed']} chunk(s) processed"
+                + (" via map-reduce" if result["used_map_reduce"] else "")
+            )
 
 st.markdown("---")
 st.markdown(
-    "<center>Built with Streamlit, FastAPI, LangChain, FAISS & Groq</center>",
+    "<center>Built with Streamlit, FastAPI, LangChain, FAISS, Postgres & S3</center>",
     unsafe_allow_html=True,
 )

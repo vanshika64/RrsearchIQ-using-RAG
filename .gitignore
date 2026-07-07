@@ -1,4 +1,68 @@
-venv/
-.env
+# ==========================
+# Python
+# ==========================
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Environment Variables
+.env
+backend/.env
+
+# VS Code
+.vscode/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# ==========================
+# Project Generated Files
+# ==========================
+
+# Uploaded PDFs
+backend/data/
+
+# Temporary Files
+backend/tmp/
+
+# FAISS Vector Store
+backend/vector_store/
+
+# Logs
+*.log
+
+# SQLite (if you ever use it)
+*.db
+*.sqlite3
+
+# Pytest
+.pytest_cache/
+
+# Mypy
+.mypy_cache/
+
+# Ruff
+.ruff_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Secrets
+*.pem
+*.key
+*.crt
